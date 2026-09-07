@@ -1,3 +1,4 @@
+import { ConfiguredServiceEndpoints } from "@/AWS/Endpoint.ts";
 import { AWSEnvironment } from "@/AWS/Environment.ts";
 import {
   FLOCI_ACCOUNT_ID,
@@ -21,7 +22,7 @@ import { describe, expect, it } from "alchemy-test";
 const readProfile = (profile: Parameters<typeof flociServices>[0]) =>
   Effect.gen(function* () {
     const context = yield* Layer.build(flociServices(profile));
-    const endpoint = Context.get(context, Endpoint.Endpoint);
+    const endpoint = Endpoint.resolve("S3").pipe(Effect.provide(context));
     const region = Context.get(context, Region);
     const credentials = Context.get(context, Credentials);
     const environment = Context.get(context, AWSEnvironment);
@@ -45,6 +46,31 @@ const readContextualProfile = (profile: Parameters<typeof flociServices>[0]) =>
   });
 
 describe("Floci local provider profiles", () => {
+  it.effect(
+    "preserves service overrides while isolating local profile defaults",
+    () =>
+      Effect.gen(function* () {
+        for (const port of [4585, 4586]) {
+          const gateway = `http://localhost:${port}`;
+          const ses = `${gateway}/ses`;
+          const sesv2 = `${gateway}/sesv2`;
+          const context = yield* Layer.build(
+            flociServices({ endpoint: gateway, autoStart: false }).pipe(
+              Layer.provide(
+                Layer.succeed(ConfiguredServiceEndpoints, { ses, sesv2 }),
+              ),
+            ),
+          );
+          const resolve = (service: string) =>
+            Endpoint.resolve(service).pipe(Effect.provide(context));
+          expect(yield* resolve("SES")).toBe(ses);
+          expect(yield* resolve("SESv2")).toBe(sesv2);
+          expect(yield* resolve("S3")).toBe(gateway);
+          expect(yield* resolve("SQS")).toBe(gateway);
+        }
+      }),
+  );
+
   it.effect("keeps the standalone Floci identity defaults", () =>
     Effect.gen(function* () {
       const profile = resolveFlociProfile();

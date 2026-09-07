@@ -2,6 +2,7 @@
 
 import * as Floci from "@alchemy.run/floci";
 import type { FlociError } from "@alchemy.run/floci";
+import { Endpoint as AwsEndpoint } from "@distilled.cloud/aws";
 import { Credentials } from "@distilled.cloud/aws/Credentials";
 import type { RegionName } from "@distilled.cloud/aws/Region";
 import * as Context from "effect/Context";
@@ -177,6 +178,7 @@ export const resolveFlociProfile = (
 // hand this to `provideProviderContext`, which takes `Layer<any, any, never>`.
 const makeFlociServices = (
   input: FlociProfile,
+  serviceEndpoints: Readonly<Record<string, string>>,
 ): Layer.Layer<any, FlociError, never> => {
   const profile = resolveFlociProfile(input);
   const region = profile.region as RegionName;
@@ -192,9 +194,15 @@ const makeFlociServices = (
     port: profile.floci?.port ?? portOf(profile.endpoint),
   };
   return Layer.mergeAll(
-    // Pin every distilled SDK call made by a wrapped lifecycle method to the
-    // emulator gateway with dummy credentials in the emulator's region.
-    Endpoint.of(profile.endpoint),
+    // Service-specific emulators own their configured operations; every other
+    // service stays in this local profile's gateway and credential scope.
+    Layer.succeed(AwsEndpoint.Endpoint, Effect.undefined),
+    Layer.succeed(AwsEndpoint.ServiceEndpoint, {
+      resolve: (service: string) =>
+        serviceEndpoints[service] ??
+        serviceEndpoints[service.toLowerCase().replace(/[^a-z0-9]/g, "")] ??
+        profile.endpoint,
+    }),
     Region.of(region),
     Layer.succeed(Credentials, credentials),
     // Providers read `AWSEnvironment.current` inside lifecycle operations to
@@ -207,6 +215,7 @@ const makeFlociServices = (
         region: profile.region,
         credentials,
         endpoint: profile.endpoint,
+        serviceEndpoints,
       }),
     ),
     // Building the services guarantees the emulator is serving: reuses
@@ -233,10 +242,16 @@ export const flociServices = (
 ): Layer.Layer<any, FlociError, never> =>
   Layer.unwrap(
     Effect.gen(function* () {
-      if (profile !== undefined) return makeFlociServices(profile);
+      const serviceEndpoints = Option.getOrElse(
+        yield* Effect.serviceOption(Endpoint.ConfiguredServiceEndpoints),
+        () => ({}),
+      );
+      if (profile !== undefined)
+        return makeFlociServices(profile, serviceEndpoints);
       const selected = yield* Effect.serviceOption(FlociProfileService);
       return makeFlociServices(
         Option.getOrElse(selected, () => ({}) as FlociProfile),
+        serviceEndpoints,
       );
     }),
   ) as Layer.Layer<any, FlociError, never>;
